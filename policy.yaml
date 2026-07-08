@@ -1,0 +1,9 @@
+version: "1"
+detectors: [prompt_injection, pii, rag_injection]
+scores:
+  prompt_injection: 70
+  pii: 20
+  rag_injection: 60
+thresholds:
+  block_score: 80
+  transform_score: 40
