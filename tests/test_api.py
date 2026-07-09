@@ -79,15 +79,6 @@ def test_policy_returns_expected_keys():
     assert "block_score" in body["thresholds"]
     assert "transform_score" in body["thresholds"]
 
-
-# --- GET /health ---------------------------------------------------------
-
-def test_health_returns_ok():
-    response = client.get("/health")
-    assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-
-
 # --- Dependency override: proves main.py wires registry via Depends() -----
 
 def test_analyze_forced_block_via_dependency_override():

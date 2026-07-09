@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import collections
 import difflib
+import math
 import re
 import unicodedata
-from typing import Dict, List, Pattern, Tuple
+from typing import Dict, List, Optional, Pattern, Tuple
 
 from app.models import DetectorResult
 
@@ -28,6 +30,10 @@ _HOMOGLYPH_RE = re.compile("|".join(re.escape(k) for k in _HOMOGLYPHS))
 # matching, never for what we show back in evidence/logs (too aggressive
 # to use everywhere; e.g. would mangle legitimate text).
 _LEET_MAP = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a"})
+
+# Words that mix letters with leet-style digits/@ (e.g. "1gn0re", "@dmin").
+# Used only to *count* evasion attempts, not to display anything back.
+_LEET_MIX_RE = re.compile(r"\b(?=\w*[a-zA-Z])(?=\w*[013457@])\w+\b")
 
 # "i g n o r e" style letter-spacing evasion: collapse 3+ single
 # characters separated by single spaces back into one word.
@@ -58,6 +64,18 @@ def normalize(text: str) -> str:
 def _leet_normalized(text: str) -> str:
     """Extra-aggressive pass used only for matching, not for display."""
     return text.translate(_LEET_MAP)
+
+
+def _evasion_counts(raw: str) -> Dict[str, int]:
+    """Count (not remove) evasion techniques used in the raw text. A single
+    evasion trick is weak signal on its own; a pile of them together is
+    itself suspicious, independent of whether any one pattern matched."""
+    return {
+        "homoglyph": len(_HOMOGLYPH_RE.findall(raw)),
+        "zero_width": len(_ZERO_WIDTH_RE.findall(raw)),
+        "leet_mix": len(_LEET_MIX_RE.findall(raw)),
+        "spaced_letters": len(_SPACED_LETTERS_RE.findall(raw)),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -179,15 +197,86 @@ def _best_fuzzy_ratio(phrase: str, text: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Multilingual keyword tables
+# ---------------------------------------------------------------------------
+# Not full translation (an LLM-free detector can't do that well) — just the
+# handful of high-signal attack verbs/nouns ("ignore", "forget", "reveal",
+# "system", "admin", ...) in each language. Substring matching rather than
+# \b-delimited regex, since word boundaries don't work the same way for
+# CJK/Arabic scripts. This is deliberately narrow: it exists to catch the
+# "just ask in another language" bypass, not to be a translator.
+
+_MULTILINGUAL_KEYWORDS: Dict[str, List[str]] = {
+    "ja": ["無視して", "無視しろ", "忘れて", "見せて", "表示して", "繰り返して", "上書き", "開発者モード", "システムプロンプト"],
+    "zh": ["忽略之前", "忘记之前", "显示系统提示", "透露指令", "重复以上", "覆盖指令", "开发者模式", "系统提示"],
+    "es": ["ignora las instrucciones", "olvida las instrucciones", "muestra el mensaje del sistema",
+           "revela tus instrucciones", "modo desarrollador"],
+    "hi": ["पिछले निर्देशों को अनदेखा करो", "भूल जाओ", "सिस्टम प्रॉम्प्ट दिखाओ", "डेवलपर मोड"],
+    "fr": ["ignore les instructions", "oublie les instructions", "révèle tes instructions",
+           "montre le prompt système", "mode développeur"],
+    "de": ["ignoriere die anweisungen", "vergiss die anweisungen", "zeige den systemprompt",
+           "enthülle deine anweisungen", "entwicklermodus"],
+    "ru": ["игнорируй инструкции", "забудь инструкции", "покажи системный промпт",
+           "раскрой инструкции", "режим разработчика"],
+    "ar": ["تجاهل التعليمات السابقة", "انسَ التعليمات", "أظهر توجيهات النظام", "اكشف تعليماتك", "وضع المطور"],
+}
+
+
+def _multilingual_hits(raw: str) -> List[str]:
+    hits = []
+    for lang, phrases in _MULTILINGUAL_KEYWORDS.items():
+        for phrase in phrases:
+            if phrase in raw:
+                hits.append(f"lang={lang} phrase_match")
+                break  # one hit per language is enough signal
+    return hits
+
+
+# ---------------------------------------------------------------------------
 # 3. Structural / formatting attacks (fake delimiters, role markup)
 # ---------------------------------------------------------------------------
 
 _STRUCTURAL_PATTERNS: List[Pattern] = [
-    re.compile(r"#{2,}\s*(system|admin|root)\b", re.IGNORECASE),
+    re.compile(r"#{1,6}\s*(system|admin|root)\b", re.IGNORECASE | re.MULTILINE),
     re.compile(r"</?(system|admin)>", re.IGNORECASE),
     re.compile(r"\bbegin prompt\b.*\bend prompt\b", re.IGNORECASE | re.DOTALL),
     re.compile(r"\[/?(inst|sys)\]", re.IGNORECASE),
+    re.compile(r"^>{1,}\s*(system|admin|developer)\b", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\*{3,}\s*$", re.MULTILINE),
+    re.compile(r"```\s*system\b", re.IGNORECASE),
 ]
+
+# ---------------------------------------------------------------------------
+# 3b. Embedded / indirect instruction detection
+# ---------------------------------------------------------------------------
+# OWASP's indirect-injection case: the directive isn't addressed to the
+# model directly, it's smuggled inside markup that a naive pipeline (or a
+# RAG-retrieved document) would otherwise just pass through — HTML
+# comments, code fences, fake YAML/JSON role metadata. We extract the
+# *content* of each container and re-check it for imperative/override
+# language, rather than only matching the container syntax itself.
+
+_EMBEDDED_BLOCK_PATTERNS: List[Pattern] = [
+    re.compile(r"<!--(.*?)-->", re.DOTALL),
+    re.compile(r"```(?:system|admin)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE),
+    re.compile(r"<system>(.*?)</system>", re.DOTALL | re.IGNORECASE),
+    re.compile(r'"role"\s*:\s*"(?:system|admin|developer)"[^}]*"content"\s*:\s*"([^"]*)"', re.IGNORECASE),
+    re.compile(r"(?m)^\s*(?:role|developer|system)\s*:\s*(.+)$", re.IGNORECASE),
+]
+
+
+def _embedded_instruction_hits(text: str) -> List[str]:
+    hits: List[str] = []
+    for pattern in _EMBEDDED_BLOCK_PATTERNS:
+        for match in pattern.finditer(text):
+            inner = match.group(1) if match.groups() else match.group(0)
+            if not inner or not inner.strip():
+                continue
+            inner_norm = normalize(inner)
+            if _IMPERATIVE_VERBS_RE.search(inner_norm):
+                hits.append("hidden_directive_in_markup")
+    return hits
+
 
 # ---------------------------------------------------------------------------
 # 4. Encoded payload heuristics
@@ -196,6 +285,29 @@ _STRUCTURAL_PATTERNS: List[Pattern] = [
 _BASE64_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 _HEX_BLOB_RE = re.compile(r"(?:[0-9a-fA-F]{2}\s?){20,}")
 _ROT13_HINT_RE = re.compile(r"\brot[\s-]?13\b", re.IGNORECASE)
+_LONG_TOKEN_RE = re.compile(r"\S{20,}")
+_ENTROPY_THRESHOLD = 4.0  # bits/char; ordinary prose sits well below this
+
+
+def _shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    counts = collections.Counter(s)
+    length = len(s)
+    return -sum((c / length) * math.log2(c / length) for c in counts.values())
+
+
+def _entropy_signals(text: str) -> List[str]:
+    """Catches obfuscated/encoded payloads generally (not just base64) —
+    XOR'd blobs, unusual compressed encodings, etc. all show up as
+    high-entropy tokens even when they don't match a specific regex."""
+    signals = []
+    for token in set(_LONG_TOKEN_RE.findall(text)):
+        entropy = _shannon_entropy(token)
+        if entropy >= _ENTROPY_THRESHOLD:
+            signals.append(f"high_entropy_blob(entropy={entropy:.2f},len={len(token)})")
+    return signals
+
 
 # ---------------------------------------------------------------------------
 # 5. Statistical / structural anomaly features
@@ -205,6 +317,19 @@ _IMPERATIVE_VERBS_RE = re.compile(
     r"\b(ignore|disregard|forget|reveal|show|print|repeat|act|pretend|"
     r"override|bypass|execute|run|delete|reset)\b"
 )
+_SENTENCE_SPLIT_RE = re.compile(r"[.!?\n]+")
+
+
+def _instruction_density(normalized: str) -> float:
+    """imperative verbs / sentence count. A single 'ignore previous
+    instructions' is one thing; a chain of five imperative commands packed
+    into a few sentences is a much stronger signal than the same verbs
+    spread across a long, mostly-normal message."""
+    sentences = [s for s in _SENTENCE_SPLIT_RE.split(normalized) if s.strip()]
+    if not sentences:
+        return 0.0
+    verb_hits = len(_IMPERATIVE_VERBS_RE.findall(normalized))
+    return verb_hits / len(sentences)
 
 
 def _statistical_signals(raw: str, normalized: str) -> List[str]:
@@ -213,6 +338,10 @@ def _statistical_signals(raw: str, normalized: str) -> List[str]:
     imperative_hits = len(_IMPERATIVE_VERBS_RE.findall(normalized))
     if imperative_hits >= 3:
         signals.append(f"high imperative-verb density ({imperative_hits} hits)")
+
+    density = _instruction_density(normalized)
+    if density >= 1.2:
+        signals.append(f"instruction density {density:.2f} verbs/sentence")
 
     if len(raw) > 20:
         caps_ratio = sum(1 for c in raw if c.isupper()) / len(raw)
@@ -229,7 +358,98 @@ def _statistical_signals(raw: str, normalized: str) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# 6. False-positive dampening — talking *about* injection vs *doing* it
+# 5b. Multi-stage sequencing, role-transition faking, and semantic
+#     contradictions
+# ---------------------------------------------------------------------------
+
+_SEQUENCE_MARKER_RE = re.compile(
+    r"\b(step\s*\d+|first,|second,|third,|then,|after that,|finally,|next,)\b",
+    re.IGNORECASE,
+)
+_ROLE_LINE_RE = re.compile(r"(?m)^\s*(user|assistant|system|developer|admin)\s*:", re.IGNORECASE)
+
+_CONTRADICTION_PAIRS: List[Tuple[Pattern, Pattern]] = [
+    (re.compile(r"\bignore\b"), re.compile(r"\bfollow\b")),
+    (re.compile(r"\bforget\b"), re.compile(r"\bremember\b")),
+    (re.compile(r"\bdisregard\b"), re.compile(r"\bfollow\b")),
+]
+
+
+def _sequence_chain_hit(normalized: str) -> bool:
+    """Chained commands ('ignore... then... after that... finally...' or
+    'Step 1 / Step 2 / Step 3') are materially more dangerous than a single
+    isolated instruction — they indicate a planned multi-stage attack
+    rather than one impulsive line."""
+    markers = len(_SEQUENCE_MARKER_RE.findall(normalized))
+    verbs = len(_IMPERATIVE_VERBS_RE.findall(normalized))
+    return markers >= 2 and verbs >= 2
+
+
+def _role_transition_hit(text: str) -> bool:
+    """Fake multi-turn conversations (User: / Assistant: / System: /
+    Developer: as literal lines) are a common way to trick a model into
+    thinking a system message already authorized something."""
+    roles_seen = {m.group(1).lower() for m in _ROLE_LINE_RE.finditer(text)}
+    return len(roles_seen) >= 2
+
+
+def _contradiction_hit(normalized: str) -> bool:
+    """'Ignore previous instructions, follow these' / 'forget everything,
+    remember only this' — contradictory verb pairs co-occurring are a
+    strong rule-based proxy for override intent, even without an LLM."""
+    return any(a.search(normalized) and b.search(normalized) for a, b in _CONTRADICTION_PAIRS)
+
+
+# ---------------------------------------------------------------------------
+# 5c. Context-window stuffing (huge filler prefix, payload near the end)
+# ---------------------------------------------------------------------------
+
+_FILLER_REPEAT_RE = re.compile(r"(.)\1{15,}")
+_REPEAT_N_TIMES_RE = re.compile(r"repeat\s+.{0,40}\s+\d{2,}\s+times", re.IGNORECASE)
+_CONTEXT_STUFF_MIN_WORDS = 60
+_CONTEXT_STUFF_TAIL_FRACTION = 0.2
+
+
+def _context_window_stuffing_hit(normalized: str) -> bool:
+    if _FILLER_REPEAT_RE.search(normalized) or _REPEAT_N_TIMES_RE.search(normalized):
+        return True
+
+    words = normalized.split()
+    if len(words) < _CONTEXT_STUFF_MIN_WORDS:
+        return False
+
+    tail_start = int(len(words) * (1 - _CONTEXT_STUFF_TAIL_FRACTION))
+    head_text = " ".join(words[:tail_start])
+    tail_text = " ".join(words[tail_start:])
+
+    # Payload present in the last 20% but absent from the long lead-in ->
+    # classic "huge prefix, then the real instruction" pattern.
+    return bool(
+        _IMPERATIVE_VERBS_RE.search(tail_text)
+        and not _IMPERATIVE_VERBS_RE.search(head_text)
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. URL / external-instruction-source analysis
+# ---------------------------------------------------------------------------
+
+_URL_RE = re.compile(r"https?://[^\s)>\]]+")
+_URL_INSTRUCTION_CONTEXT_RE = re.compile(
+    r"\b(visit|follow|open|download|fetch|load|go to)\b.{0,40}https?://", re.IGNORECASE
+)
+
+
+def _url_signal(text: str) -> Optional[str]:
+    if not _URL_RE.search(text):
+        return None
+    if _URL_INSTRUCTION_CONTEXT_RE.search(text):
+        return "url_with_instruction_context"
+    return "bare_url"
+
+
+# ---------------------------------------------------------------------------
+# 7. False-positive dampening — talking *about* injection vs *doing* it
 # ---------------------------------------------------------------------------
 # This is the single highest-leverage guard here: a flat regex list
 # flags "what does 'ignore previous instructions' mean?" identically to
@@ -245,6 +465,7 @@ _META_DISCUSSION_RE = re.compile(
     re.IGNORECASE,
 )
 _QUOTED_ATTACK_PHRASE_RE = re.compile(r"[\"'“”].{0,80}(ignore|disregard|forget).{0,80}[\"'”]")
+_EDUCATIONAL_HEDGE_WORDS = ("example", "paper", "research", "study", "documentation", "quoted")
 
 
 def _looks_educational(raw: str, normalized: str) -> bool:
@@ -255,8 +476,17 @@ def _looks_educational(raw: str, normalized: str) -> bool:
     return False
 
 
+def _educational_hedge_strength(normalized: str) -> float:
+    """Gradual decay instead of a single binary dampener: the more
+    hedging/citation language present, the more we scale the score down."""
+    hits = sum(1 for w in _EDUCATIONAL_HEDGE_WORDS if w in normalized)
+    if hits == 0:
+        return 1.0
+    return max(0.4, 1.0 - 0.15 * hits)
+
+
 # ---------------------------------------------------------------------------
-# 7. Main detector
+# 8. Main detector
 # ---------------------------------------------------------------------------
 
 class PromptInjectionDetector:
@@ -264,8 +494,12 @@ class PromptInjectionDetector:
 
     Entry point (`scan`) and constructor signature are unchanged so
     existing wiring (registry / policy.yaml) keeps working unmodified.
-    Internally this is now a weighted, multi-signal risk engine instead
-    of a single flat regex hit.
+    Internally this is a weighted, multi-signal risk engine covering:
+    lexical/paraphrase matching, embedded/indirect instructions, encoded
+    payloads (regex + entropy), multilingual keywords, URL context,
+    multi-stage sequencing, fake role-transitions, semantic
+    contradictions, context-window stuffing, and obfuscation-evasion
+    density — on top of the original category + structural checks.
     """
 
     name = "prompt_injection"
@@ -308,12 +542,24 @@ class PromptInjectionDetector:
             if hit:
                 fired[category] = weight
 
+        # -- multilingual keyword hits --
+        ml_hits = _multilingual_hits(text)
+        if ml_hits:
+            fired["multilingual_override"] = 35
+            evidence.append(f"category=multilingual_override concept={ml_hits[0]} confidence=0.75")
+
+        # -- embedded / indirect instructions (comments, fences, fake role metadata) --
+        embedded_hits = _embedded_instruction_hits(text)
+        if embedded_hits:
+            fired["embedded_instruction"] = 40
+            evidence.append("category=embedded_instruction concept=hidden_directive_in_markup confidence=0.85")
+
         # -- structural / fake-delimiter attacks --
         if any(p.search(text) for p in _STRUCTURAL_PATTERNS):
             fired["structural_delimiter"] = 20
             evidence.append("category=structural_delimiter concept=fake_role_markup confidence=0.80")
 
-        # -- encoded payloads --
+        # -- encoded payloads (regex + entropy) --
         encoded_hit = False
         if _BASE64_RE.search(text):
             encoded_hit = True
@@ -324,10 +570,55 @@ class PromptInjectionDetector:
         if _ROT13_HINT_RE.search(normalized):
             encoded_hit = True
             evidence.append("category=encoded_payload concept=rot13_hint confidence=0.60")
+        entropy_hits = _entropy_signals(text)
+        if entropy_hits:
+            encoded_hit = True
+            evidence.append(f"category=encoded_payload concept={entropy_hits[0]} confidence=0.65")
         if encoded_hit:
             fired["encoded_payload"] = 20
 
-        # -- statistical anomalies --
+        # -- URL / external instruction source --
+        url_signal = _url_signal(text)
+        if url_signal == "url_with_instruction_context":
+            fired["external_instruction_source"] = 35
+            evidence.append("category=external_instruction_source concept=url_with_instruction_context confidence=0.80")
+        elif url_signal == "bare_url":
+            fired["external_instruction_source"] = 10
+            evidence.append("category=external_instruction_source concept=bare_url confidence=0.30")
+
+        # -- multi-stage sequencing --
+        if _sequence_chain_hit(normalized):
+            fired["multi_stage_execution_chain"] = 30
+            evidence.append("category=multi_stage_execution_chain concept=chained_imperatives confidence=0.70")
+
+        # -- fake role-transition (conversation spoofing) --
+        if _role_transition_hit(text):
+            fired["role_transition_spoofing"] = 30
+            evidence.append("category=role_transition_spoofing concept=multiple_role_markers confidence=0.70")
+
+        # -- semantic contradiction --
+        if _contradiction_hit(normalized):
+            fired["semantic_contradiction"] = 25
+            evidence.append("category=semantic_contradiction concept=contradictory_verb_pair confidence=0.65")
+
+        # -- context-window stuffing --
+        if _context_window_stuffing_hit(normalized):
+            fired["context_window_stuffing"] = 25
+            evidence.append("category=context_window_stuffing concept=filler_then_payload confidence=0.65")
+
+        # -- obfuscation/evasion density (homoglyphs, zero-width, leet, spaced letters) --
+        evasions = _evasion_counts(text)
+        total_evasions = sum(evasions.values())
+        if total_evasions >= 5:
+            evasion_weight = 20 if total_evasions < 15 else 30
+            fired["obfuscation_evasion"] = evasion_weight
+            evidence.append(
+                "category=obfuscation_evasion concept="
+                f"homoglyphs={evasions['homoglyph']},zero_width={evasions['zero_width']},"
+                f"leet={evasions['leet_mix']},spaced={evasions['spaced_letters']} confidence=0.70"
+            )
+
+        # -- statistical anomalies (incl. instruction density) --
         for signal in _statistical_signals(text, normalized):
             fired["statistical_anomaly"] = 15
             evidence.append(f"category=statistical_anomaly concept={signal} confidence=0.50")
@@ -342,6 +633,13 @@ class PromptInjectionDetector:
         if _looks_educational(text, normalized):
             raw_score = max(1, int(raw_score * 0.3))
             evidence.append("dampened: reads as educational/meta discussion, not an attempt")
+        else:
+            # Gradual decay based on hedging/citation language, rather than
+            # only a single binary dampener.
+            hedge_factor = _educational_hedge_strength(normalized)
+            if hedge_factor < 1.0:
+                raw_score = max(1, int(raw_score * hedge_factor))
+                evidence.append(f"dampened: hedge_factor={hedge_factor:.2f} (citation/example language present)")
 
         severity = "high" if raw_score >= 60 else "medium" if raw_score >= 30 else "low"
         evidence.insert(0, f"severity={severity} aggregate_score={raw_score} categories={sorted(fired)}")

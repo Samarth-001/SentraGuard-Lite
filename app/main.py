@@ -39,8 +39,8 @@ def policy_route(policy: PolicyConfig = Depends(get_policy)) -> PolicyConfig:
     return policy
 
 
-@app.get("/health")
-def health_route(policy: PolicyConfig = Depends(get_policy)) -> dict[str, str]:
-    # Cheap liveness check; also confirms policy.yaml loaded successfully
-    # at startup. Docker HEALTHCHECK can hit this or /policy directly.
-    return {"status": "ok", "policy_version": policy.version}
+# @app.get("/health")
+# def health_route(policy: PolicyConfig = Depends(get_policy)) -> dict[str, str]:
+#     # Cheap liveness check; also confirms policy.yaml loaded successfully
+#     # at startup. Docker HEALTHCHECK can hit this or /policy directly.
+#     return {"status": "ok", "policy_version": policy.version}

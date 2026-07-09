@@ -282,7 +282,7 @@ with left:
     with top_row[0]:
         st.markdown('<div class="card-title">Context documents <span style="color:#565b6b;">(0–3, e.g. RAG chunks)</span></div>', unsafe_allow_html=True)
     with top_row[1]:
-        if st.button("＋ add", use_container_width=True, disabled=st.session_state.num_docs >= 3):
+        if st.button("＋ add", use_container_width=True, disabled=st.session_state.num_docs >= 6):
             st.session_state.num_docs += 1
             st.rerun()
     with top_row[2]:
