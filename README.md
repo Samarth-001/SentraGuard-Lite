@@ -73,41 +73,6 @@ API response
 
 ---
 
-## Project structure
-
-```
-sentraguard-lite/
-├── app/
-│   ├── main.py              # FastAPI app — route wiring only
-│   ├── config.py            # loads policy.yaml, env vars
-│   ├── models.py            # Pydantic request/response/domain models
-│   ├── analyzer.py          # combines detector results -> policy engine
-│   ├── policy_engine.py     # scoring + decision logic (pure functions)
-│   ├── registry.py          # detector registry / dependency wiring
-│   └── detectors/
-│       ├── base.py          # Detector protocol + shared contract
-│       ├── prompt_injection.py
-│       ├── pii.py
-│       └── rag_injection.py
-├── policy.yaml               # detector scores + thresholds, versioned
-├── cli.py                    # single CLI command
-├── streamlit_app.py           # minimal UI
-├── tests/
-│   ├── unit/                 # one test file per detector, no API/network
-│   ├── test_policy_engine.py # decision logic tested against fake results
-│   ├── test_api.py           # status codes, schema, validation
-│   └── test_e2e.py           # one full prompt -> response assertion
-├── sample_request.json
-├── Dockerfile                 # API image
-├── Dockerfile.streamlit        # Streamlit UI image
-├── docker-compose.yml
-├── pyproject.toml
-├── README.md
-└── DESIGN_NOTES.md
-```
-
----
-
 ## API
 
 ### `POST /analyze`
