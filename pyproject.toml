@@ -1,0 +1,10 @@
+[project]
+dependencies = [
+    "fastapi",
+    "pydantic",
+    "uvicorn",
+    "pyyaml",
+    "streamlit",
+    "requests",
+    "plotly",
+]
