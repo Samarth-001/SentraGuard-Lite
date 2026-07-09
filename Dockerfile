@@ -18,7 +18,8 @@ RUN pip install --no-cache-dir --upgrade pip \
         "fastapi>=0.115,<1.0" \
         "uvicorn[standard]>=0.32,<1.0" \
         "pydantic>=2.9,<3.0" \
-        "pyyaml>=6.0,<7.0"
+        "pyyaml>=6.0,<7.0" \
+        "phonenumbers"
 
 # ---- Runtime stage: slim image, no compilers/build toolchain ----
 FROM python:3.12-slim AS runtime

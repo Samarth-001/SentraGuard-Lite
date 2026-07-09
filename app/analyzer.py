@@ -1,9 +1,3 @@
-"""
-Orchestration only: run detectors -> hand results to policy_engine -> build
-the response. Zero regex, zero thresholds, zero scoring math belongs here —
-if you're tempted to write `if score > 80` in this file, it belongs in
-policy_engine.py instead.
-"""
 
 from app.detectors.base import DetectorResult
 from app.models import AnalyzeRequest, AnalyzeResponse, ContextDoc, Reason
