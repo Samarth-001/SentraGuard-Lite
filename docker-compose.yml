@@ -1,0 +1,32 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sentraguard-lite-api
+    ports:
+      - "8000:8000"
+    environment:
+      - POLICY_PATH=/app/policy.yaml
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/policy')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    image: sentraguard-lite-streamlit
+    ports:
+      - "8501:8501"
+    environment:
+      # Container-to-container hostname -- compose resolves "api" to the
+      # api service on the shared network. Not localhost.
+      - SENTRAGUARD_API_URL=http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

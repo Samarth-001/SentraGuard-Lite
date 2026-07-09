@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+
+# ---- Builder stage: install Streamlit UI dependencies into a venv ----
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Matches the "Requires:" line in streamlit_app.py's docstring.
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir \
+        "streamlit>=1.38,<2.0" \
+        "requests>=2.32,<3.0" \
+        "plotly>=5.24,<6.0"
+
+# ---- Runtime stage: slim image, no build toolchain ----
+FROM python:3.12-slim AS runtime
+
+RUN useradd --create-home --uid 1000 appuser
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY streamlit_app.py ./streamlit_app.py
+
+USER appuser
+
+EXPOSE 8501
+
+# Streamlit's built-in health endpoint since 1.x.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')" || exit 1
+
+CMD ["streamlit", "run", "streamlit_app.py", \
+     "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
