@@ -16,6 +16,8 @@ it; this tells you how it thinks.
 
 ## Table of Contents
 
+- [Design Notes Summary — Assumptions, Tradeoffs, Limitations, Next Steps for Production](#design-notes-summary--assumptions-tradeoffs-limitations-next-steps-for-production)
+
 1. [Architecture recap](#1-architecture-recap)
 2. [Detector: Prompt Injection](#2-detector-prompt-injection) — full feature catalog
 3. [Detector: PII](#3-detector-pii) — full feature catalog
@@ -27,6 +29,144 @@ it; this tells you how it thinks.
 9. [Cross-cutting design decisions](#9-cross-cutting-design-decisions)
 10. [Known limitations & production hardening roadmap](#10-known-limitations--production-hardening-roadmap)
 11. [Deviations from the original spec — flagged explicitly](#11-deviations-from-the-original-spec--flagged-explicitly)
+
+---
+
+## Design Notes Summary — Assumptions, Tradeoffs, Limitations, Next Steps for Production
+
+This is the deliverable-format summary the spec asks for: **assumptions,
+tradeoffs, limitations, and next steps for production**, in one place.
+Everything here is condensed from — and cross-referenced to — the detailed
+sections below, which contain the full reasoning behind each point.
+
+### Assumptions
+
+- No ML model was assumed available and the system was assumed to need to
+  run fully **offline and deterministically** — this is why detection is
+  regex/heuristic-based rather than embedding- or classifier-based
+  throughout (§2, §3, §4).
+- `policy_engine.py`, `config.py`, and `registry.py` were **not available**
+  when this document was written. Their behavior is *assumed/inferred*
+  from how `analyzer.py` and `main.py` call them (`combine_score()`,
+  `decide()`, `registry.detectors`, `registry.doc_detectors`,
+  `registry.thresholds`) — see §8. This should be verified once those
+  files are shared.
+- Assumed `GET /policy` should reflect the **static config file**
+  (`policy.yaml`) rather than dynamically-computed detector behavior,
+  matching the spec's "returns the loaded policy/detectors configuration"
+  wording — even though, per §9.1, that now makes it an incomplete
+  picture of actual per-request scoring.
+- Assumed a single global policy applies to every caller — no
+  per-`app_id`/tenant policy variation, despite `metadata.app_id` being
+  present on every request.
+- Assumed default phone region **"US"** is an acceptable default for the
+  PII detector; international formats are lower priority for this MVP (§3.3).
+- Assumed the spec's example evidence string (`"matched phrase: ignore
+  previous instructions"`) was illustrative of *format*, not a license to
+  echo arbitrary matched user/document text back in evidence — evidence
+  was kept structured and redaction-safe everywhere instead (§9.3).
+- Assumed the "0–3 context documents" line in the spec was an example
+  count rather than a hard UI/API limit — the implemented UI allows up to
+  6 (§11). Flagged as an assumption worth confirming, not treated as
+  settled.
+- Assumed detector constructors should **keep their original `score`
+  parameter** for backward compatibility with existing registry/
+  `policy.yaml` wiring, even after scoring logic moved inside each
+  detector (§9.1) — avoids a breaking change to call sites outside these
+  three files.
+
+### Tradeoffs
+
+- **Regex/heuristics over ML** — full determinism, no external model
+  dependency, fast, fully offline and unit-testable, at the cost of
+  proxy-based detection rather than true semantic understanding.
+- **Shared rule tables between `prompt_injection.py` and
+  `rag_injection.py`** (§4.1, §9.4) — chosen after observing the two
+  detectors' signature lists drift apart (RAG injection previously had 4
+  patterns vs. prompt injection's much larger set). Traded full detector
+  independence for a single source of truth on attack categories.
+- **PII phone detection uses `Leniency.POSSIBLE`, not the library default
+  `Leniency.VALID`** (§3.3) — accepts more false positives (numbers that
+  look plausible but aren't real/assigned) in exchange for not silently
+  missing common placeholder/test-fixture numbers like `555-xxxx`.
+- **Detect-then-merge-then-redact in one pass**, instead of sequential
+  `regex.sub()` per pattern (§3.6, §9.2) — more upfront complexity
+  (`Finding` dataclasses, span math, index maps) in exchange for
+  correctness: no offset-shifting bugs, no double-redaction, no
+  accidental new matches created by an earlier substitution.
+- **Fuzzy/paraphrase matching (difflib) applied only to prompts, not RAG
+  documents** (§4.3) — keeps RAG injection's cost and complexity bounded,
+  at the cost of narrower paraphrase coverage for embedded document
+  attacks.
+- **Dampening false positives by scaling score down, not suppressing
+  entirely** (§2.13, §4.4) — keeps borderline content visible and
+  auditable in `reasons` rather than silently hidden, at the cost of
+  letting some genuinely ambiguous content through at a reduced but
+  nonzero score.
+- **Detector-level dynamic scoring vs. flat `policy.yaml` scores** (§9.1)
+  — produces more expressive, better-calibrated per-request scores, at
+  the direct cost of `policy.yaml`/`GET /policy` now describing scoring
+  behavior that doesn't fully match reality. This is the single tradeoff
+  in this document most in need of a deliberate resolution.
+- **Assumed sum-capped-at-100 score combination** across detectors, rather
+  than a max-plus-corroboration approach (§8) — simpler to reason about
+  and test, at the cost of two low-severity matches potentially combining
+  into a decision neither would trigger alone. Not confirmed against the
+  real `policy_engine.py`.
+
+### Limitations
+
+Full detail in §10 — condensed here:
+
+- Detection is heuristic/proxy-based, not semantic; a sufficiently novel
+  phrasing, encoding, or language can evade any given layer.
+- Homoglyph and multilingual coverage are hand-curated and intentionally
+  partial, not exhaustive.
+- The educational/meta-discussion false-positive dampener is shallow
+  pattern matching and can both under- and over-dampen genuinely
+  ambiguous content.
+- Paraphrase/fuzzy matching doesn't extend to RAG documents.
+- `policy.yaml`'s declared per-detector scores are stale relative to
+  actual dynamic detector behavior.
+- No hot-reload of policy config — a threshold change requires a restart.
+- No authentication, rate limiting, or structured audit logging at the
+  API layer.
+
+### Next steps for production
+
+1. **Resolve the `policy.yaml` / detector-score mismatch** (§9.1) — either
+   expose real dynamic weight ranges via `/policy`, or make the config
+   file the authoritative primary scoring path again. This is the highest-
+   priority item, since it affects the accuracy of the system's own
+   self-description.
+2. **Confirm the inferred behavior of `policy_engine.py`, `config.py`,
+   and `registry.py`** (§8) against their real source, and update this
+   document's Scoring & Policy Engine section from "inferred" to
+   "confirmed."
+3. Add **authentication and rate limiting** at the API gateway/middleware
+   layer (not inside this service).
+4. Add **structured, redaction-safe audit logging** of decisions
+   (decision, score, tags, request_id — never raw prompt/context text) for
+   monitoring and compliance.
+5. Support **policy hot-reload** (or at minimum a documented reload
+   signal/endpoint) instead of requiring a full restart to pick up
+   `policy.yaml` changes.
+6. **Extend fuzzy/paraphrase matching to RAG documents** — currently
+   prompt-only (§4.3).
+7. Consider an **ML/embedding-based secondary pass** for higher-recall
+   semantic matching, layered on top of (not replacing) the current
+   deterministic rule engine — preserves auditability while closing the
+   biggest structural gap (proxy detection vs. true understanding).
+8. **Wire the Streamlit risk gauge's color bands to the live-fetched
+   policy thresholds** instead of the current hardcoded 40/80 split (§11).
+9. Add **input size guards** (max prompt length, max context docs, max
+   per-doc size) ahead of detector execution — several signals (entropy
+   scanning, fuzzy matching) scale with input size, so bounding worst-case
+   latency matters before this sees production traffic.
+10. **Deliberately settle the 3-vs-6 context-document UI limit** (§11) and
+    align the spec, the API, and the UI on one number.
+11. Expand phone-number detection beyond the default "US" region
+    assumption (§3.3) if international traffic is expected.
 
 ---
 
