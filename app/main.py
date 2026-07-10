@@ -16,6 +16,12 @@ from app.config import PolicyConfig
 from app.models import AnalyzeRequest, AnalyzeResponse
 from app.registry import DetectorRegistry, get_registry
 
+from app.detectors.rag_injection import get_default_embedding_backend
+from app.detectors.prompt_injection import _SemanticClassifier
+
+get_default_embedding_backend()
+_SemanticClassifier()
+
 app = FastAPI(title="SentraGuard Lite")
 
 

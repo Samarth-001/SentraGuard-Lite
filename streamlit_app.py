@@ -320,7 +320,7 @@ with left:
         }
         try:
             with st.spinner("Scanning..."):
-                resp = requests.post(f"{api_url}/analyze", json=payload, timeout=10)
+                resp = requests.post(f"{api_url}/analyze", json=payload, timeout=20)
             if resp.status_code == 422:
                 st.error("The API rejected this payload as invalid (422). Check that all fields are filled in correctly.")
                 st.session_state.result = None
