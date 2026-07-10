@@ -1,5 +1,9 @@
 import argparse
 import json
+import sys
+from json import JSONDecodeError
+
+from pydantic import ValidationError
 
 from app.analyzer import analyze
 from app.models import AnalyzeRequest
@@ -13,24 +17,41 @@ def main():
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    with open(args.input) as f:
-        data = json.load(f)
+    try:
+        with open(args.input) as f:
+            data = json.load(f)
 
-    # AnalyzeRequest is a pydantic model, so model_validate handles nested
-    # context_docs and metadata conversion automatically.
-    request = AnalyzeRequest.model_validate(data)
+        request = AnalyzeRequest.model_validate(data)
 
-    # get_registry() reuses the singleton DetectorRegistry, which loads the
-    # real policy.yaml via load_policy() (same as main.py's FastAPI dep).
-    registry = get_registry()
+        registry = get_registry()
 
-    result = analyze(request, registry)
+        result = analyze(request, registry)
 
-    # AnalyzeResponse is also a pydantic model.
-    with open(args.output, "w") as f:
-        json.dump(result.model_dump(), f, indent=2)
+        with open(args.output, "w") as f:
+            json.dump(result.model_dump(), f, indent=2)
 
-    print(f"Wrote {args.output}")
+        print(f"Wrote {args.output}")
+
+    except FileNotFoundError as e:
+        print(f"Input file not found: {e.filename}", file=sys.stderr)
+        sys.exit(1)
+
+    except PermissionError as e:
+        print(f"Permission denied: {e.filename}", file=sys.stderr)
+        sys.exit(1)
+
+    except JSONDecodeError as e:
+        print(f"Invalid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    except ValidationError as e:
+        print("Input does not match AnalyzeRequest schema:", file=sys.stderr)
+        print(e, file=sys.stderr)
+        sys.exit(1)
+
+    except Exception as e:
+        print(f"Unexpected error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
