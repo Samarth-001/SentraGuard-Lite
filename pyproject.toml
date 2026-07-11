@@ -8,6 +8,7 @@ dependencies = [
     "requests",
     "plotly",
     "phonenumbers>=8.13,<9",
+    "PyJWT>=2.10,<3",
 ]
 
 [project.optional-dependencies]

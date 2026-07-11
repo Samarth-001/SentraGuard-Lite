@@ -8,8 +8,10 @@ services:
       - "8000:8000"
     environment:
       - POLICY_PATH=/app/policy.yaml
+      - SENTRAGUARD_API_KEYS=myapp:test-key-123
+      - SENTRAGUARD_RATE_LIMIT_BACKEND=memory
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/policy')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -23,9 +25,8 @@ services:
     ports:
       - "8501:8501"
     environment:
-      # Container-to-container hostname -- compose resolves "api" to the
-      # api service on the shared network. Not localhost.
       - SENTRAGUARD_API_URL=http://api:8000
+      - SENTRAGUARD_API_KEY=test-key-123
     depends_on:
       api:
         condition: service_healthy

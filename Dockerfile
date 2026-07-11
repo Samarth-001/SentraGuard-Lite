@@ -8,18 +8,15 @@ WORKDIR /build
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
+COPY requirements.txt .
+
 # Pinned, explicit deps -- matches what's actually imported across app/.
 # If pyproject.toml is later set up as a proper PEP 621 installable
 # package (per the step-11 hygiene checklist), swap this block for
 # `COPY pyproject.toml ./` + `pip install .` so the Dockerfile and
 # pyproject.toml can't drift out of sync.
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir \
-        "fastapi>=0.115,<1.0" \
-        "uvicorn[standard]>=0.32,<1.0" \
-        "pydantic>=2.9,<3.0" \
-        "pyyaml>=6.0,<7.0" \
-        "phonenumbers"
+    && pip install --no-cache-dir -r requirements.txt
 
 # ---- Runtime stage: slim image, no compilers/build toolchain ----
 FROM python:3.12-slim AS runtime
