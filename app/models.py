@@ -32,14 +32,23 @@ class ContextDoc(BaseModel):
 
     id: str
     text: str
+    # Trust classification used for context-weighted scoring, e.g.
+    # "trusted_document", "internal_wiki", "external_pdf". Falls back to
+    # policy.weights.context["default"] if unrecognized.
+    source: str = "default"
 
 
 class Metadata(BaseModel):
-    """Caller-supplied metadata. Used for tracing/logging, never for decisions."""
+    """Caller-supplied metadata. Used for tracing/logging/policy routing,
+    never fed directly into detector scan() calls."""
 
     app_id: str
     user_id: str
     request_id: str
+    # Which policy (policy/tenants/{tenant_id}.yaml) applies to this request.
+    tenant_id: str = "default"
+    # Drives user-weighted scoring, e.g. "admin", "trusted", "anonymous".
+    user_role: str = "default"
 
 
 class AnalyzeRequest(BaseModel):

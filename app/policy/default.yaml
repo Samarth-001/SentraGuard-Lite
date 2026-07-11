@@ -1,0 +1,36 @@
+version: "2026.07.10"
+
+detectors:
+  - prompt_injection
+  - pii
+  - rag_injection
+
+thresholds:
+  block: 80
+  transform: 50
+
+weights:
+  detectors:
+    prompt_injection: 60
+    pii: 50
+    rag_injection: 40
+  context:
+    prompt: 1.0
+    trusted_document: 0.7
+    internal_wiki: 0.7
+    external_document: 1.5
+    external_pdf: 1.5
+    default: 1.0
+  user_role:
+    admin: 1.3
+    trusted: 1.0
+    anonymous: 1.0
+    default: 1.0
+
+compound_rules:
+  - tags: [prompt_injection, rag_injection]
+    action: block
+  - tags: [pii, prompt_injection]
+    action: block
+  - tags: [jailbreak, tool_override]
+    action: block

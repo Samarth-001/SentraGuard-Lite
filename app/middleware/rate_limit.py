@@ -1,9 +1,11 @@
 """Redis-backed sliding-window rate limiting, per app_id and per user_id.
 
 Wired via Depends() so it composes with auth (Principal) and so tests can
-override get_rate_limiter / get_redis with a fake or no-op via
-app.dependency_overrides -- e.g. to force a 429 without sending hundreds
-of requests, or to disable limiting entirely in unrelated tests.
+override get_rate_limiter with a fake or no-op via app.dependency_overrides
+-- e.g. to force a 429 without sending hundreds of requests, or to disable
+limiting entirely in unrelated tests. Set SENTRAGUARD_RATE_LIMIT_BACKEND=memory
+to run with zero Redis dependency (local dev, or a genuinely single-instance
+deployment) -- in that mode Redis is never contacted at all.
 
 Algorithm: sliding-window log using a Redis sorted set per key (member =
 request timestamp, score = same timestamp). Each check trims entries
@@ -74,7 +76,8 @@ class RateLimiter:
         _, _, count, _ = await pipe.execute()
         return count <= limit, int(count)
 
-    async def enforce(self, principal: Principal, client: redis.Redis) -> None:
+    async def enforce(self, principal: Principal) -> None:
+        client = get_redis()
         ok, _ = await self._check(
             client,
             f"ratelimit:app:{principal.app_id}",
@@ -135,9 +138,7 @@ class InMemoryRateLimiter:
             hits.append(now)
             return len(hits) <= limit
 
-    async def enforce(self, principal: Principal, client: object = None) -> None:
-        # `client` accepted (and ignored) so this drops in wherever a
-        # RateLimiter is expected without changing call sites.
+    async def enforce(self, principal: Principal) -> None:
         ok = await self._check(
             f"app:{principal.app_id}",
             self.config.app_id_limit,
@@ -198,7 +199,6 @@ def get_rate_limiter():
 async def enforce_rate_limit(
     principal: Principal = Depends(get_principal),
     limiter=Depends(get_rate_limiter),
-    client: redis.Redis = Depends(get_redis),
 ) -> Principal:
     """Composite dependency: resolves identity (auth) then enforces limits.
 
@@ -206,11 +206,11 @@ async def enforce_rate_limit(
     from a single Depends(), matching the get_registry / get_policy style
     already used in main.py.
 
-    `client` is only actually used when `limiter` is a RateLimiter (Redis
-    backend); InMemoryRateLimiter ignores it. It's still resolved via
-    Depends(get_redis) unconditionally today for simplicity -- if you run
-    purely in-memory long-term, gate this behind the same backend env var
-    so no Redis connection is attempted at all.
+    No longer takes `client` as a parameter. RateLimiter (Redis backend)
+    now grabs its own client lazily inside `enforce()`, only when it's
+    actually the active limiter -- InMemoryRateLimiter never triggers a
+    Redis connection attempt, even if SENTRAGUARD_REDIS_URL is unset or
+    unreachable.
     """
-    await limiter.enforce(principal, client)
+    await limiter.enforce(principal)
     return principal

@@ -10,6 +10,7 @@ Run:
 
 Config (env vars, see .env.example):
     SENTRAGUARD_API_URL   default http://localhost:8000
+    SENTRAGUARD_API_KEY   sent as X-API-Key on every request (no value = no header)
 
 Requires: streamlit, requests, plotly
 """
@@ -27,6 +28,22 @@ import plotly.graph_objects as go
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_API_URL = os.environ.get("SENTRAGUARD_API_URL", "http://localhost:8000")
+
+# Auth: main.py now requires X-API-Key (or a JWT bearer token) on /analyze
+# and /policy. Read from env so no new UI element is needed -- set this in
+# the shell that launches `streamlit run streamlit_app.py`, same as
+# SENTRAGUARD_API_URL above.
+API_KEY = os.environ.get("SENTRAGUARD_API_KEY", "")
+# API_KEY = os.environ.get("SENTRAGUARD_API_KEY", "")
+print(f"[DEBUG] API_KEY loaded: {API_KEY!r}")   # TEMP — check terminal running `streamlit run`
+
+
+def _auth_headers() -> dict:
+    """X-API-Key header dict, or {} if no key is configured (matches the
+    server's 401 "Missing credentials" behavior -- requests will simply
+    fail auth server-side rather than erroring locally)."""
+    return {"X-API-Key": API_KEY} if API_KEY else {}
+
 
 DECISION_STYLE = {
     "allow":     {"color": "#22c55e", "bg": "rgba(34,197,94,0.12)",  "label": "ALLOW",     "icon": "✓"},
@@ -200,7 +217,7 @@ with st.sidebar:
 
     if check_clicked:
         try:
-            r = requests.get(f"{api_url}/policy", timeout=4)
+            r = requests.get(f"{api_url}/policy", headers=_auth_headers(), timeout=4)
             r.raise_for_status()
             st.session_state.policy = r.json()
             st.session_state.api_healthy = True
@@ -320,9 +337,15 @@ with left:
         }
         try:
             with st.spinner("Scanning..."):
-                resp = requests.post(f"{api_url}/analyze", json=payload, timeout=20)
+                resp = requests.post(f"{api_url}/analyze", json=payload, headers=_auth_headers(), timeout=20)
             if resp.status_code == 422:
                 st.error("The API rejected this payload as invalid (422). Check that all fields are filled in correctly.")
+                st.session_state.result = None
+            elif resp.status_code == 401:
+                st.error("Authentication failed (401). Set SENTRAGUARD_API_KEY in the environment this app was launched from, matching a key configured on the API.")
+                st.session_state.result = None
+            elif resp.status_code == 429:
+                st.error("Rate limit exceeded (429). Too many requests for this app_id/user_id — wait a moment and try again.")
                 st.session_state.result = None
             else:
                 resp.raise_for_status()

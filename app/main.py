@@ -54,14 +54,11 @@ async def analyze_route(
 
 @app.get("/policy", response_model=PolicyConfig)
 async def policy_route(
-    policy: PolicyConfig = Depends(get_policy),
+    tenant_id: str = "default",
+    registry: DetectorRegistry = Depends(get_registry),
     principal: Principal = Depends(enforce_rate_limit),
 ) -> PolicyConfig:
-    # Returns policy.yaml verbatim (including `version`) -> real config
-    # artifact, not a string embedded in route code. Still auth + rate
-    # limited: policy contents (thresholds, detector toggles) are
-    # sensitive enough not to leave open.
-    return policy
+    return registry.get_policy(tenant_id)
 
 
 @app.get("/health")

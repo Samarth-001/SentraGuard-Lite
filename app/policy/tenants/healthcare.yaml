@@ -1,0 +1,3 @@
+thresholds:
+  block: 65
+  transform: 45
