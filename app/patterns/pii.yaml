@@ -1,0 +1,248 @@
+email_regex: >-
+  \b[A-Za-z0-9](?:[A-Za-z0-9._%+-]{0,62}[A-Za-z0-9])?
+  @[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?
+  (?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)+\b
+
+phone:
+  enabled: true
+  default_region: US
+  allow_international: true
+  validate_country_code: true
+  detect_extensions: true
+  max_scan_chars: 50000
+
+ner:
+  enabled: true
+  language: en
+  min_confidence: 0.40
+  max_scan_chars: 50000
+
+  merge_overlapping: true
+  merge_adjacent: true
+
+  entity_map:
+    PERSON: person
+    LOCATION: location
+    ORGANIZATION: organization
+
+    EMAIL_ADDRESS: email
+    PHONE_NUMBER: phone
+
+    CREDIT_CARD: credit_card
+    IBAN_CODE: iban
+    US_BANK_NUMBER: bank_account
+    ROUTING_NUMBER: routing_number
+    SWIFT_CODE: swift_code
+
+    US_SSN: ssn
+    PASSPORT: passport
+    US_PASSPORT: passport
+    US_DRIVER_LICENSE: drivers_license
+
+    TAX_ID: tax_id
+    EIN: ein
+
+    IP_ADDRESS: ip_address
+    IPV4: ipv4
+    IPV6: ipv6
+
+    URL: url
+    DOMAIN_NAME: domain
+
+    CRYPTO: crypto_wallet
+
+    DATE_TIME: date
+    AGE: age
+
+    MEDICAL_LICENSE: medical_license
+    MEDICAL_RECORD: medical_record
+    HEALTH_INSURANCE: insurance_id
+
+    VEHICLE_IDENTIFICATION_NUMBER: vin
+    LICENSE_PLATE: license_plate
+
+    USERNAME: username
+
+regex_detectors:
+
+  mac_address:
+    enabled: true
+
+  ipv6:
+    enabled: true
+
+  jwt_token:
+    enabled: true
+
+  aws_access_key:
+    enabled: true
+
+  github_token:
+    enabled: true
+
+  google_api_key:
+    enabled: true
+
+  slack_token:
+    enabled: true
+
+  bearer_token:
+    enabled: true
+
+  private_key:
+    enabled: true
+
+  ssh_key:
+    enabled: true
+
+  passport:
+    enabled: true
+
+  iban:
+    enabled: true
+
+  swift:
+    enabled: true
+
+  routing_number:
+    enabled: true
+
+  vin:
+    enabled: true
+
+  license_plate:
+    enabled: false
+
+tokens:
+
+  email: "[REDACTED_EMAIL]"
+  phone: "[REDACTED_PHONE]"
+  person: "[REDACTED_PERSON]"
+  location: "[REDACTED_LOCATION]"
+  organization: "[REDACTED_ORGANIZATION]"
+
+  credit_card: "[REDACTED_CREDIT_CARD]"
+  ssn: "[REDACTED_SSN]"
+  bank_account: "[REDACTED_BANK_ACCOUNT]"
+  iban: "[REDACTED_IBAN]"
+  routing_number: "[REDACTED_ROUTING_NUMBER]"
+  swift_code: "[REDACTED_SWIFT]"
+
+  ip_address: "[REDACTED_IP]"
+  ipv4: "[REDACTED_IPV4]"
+  ipv6: "[REDACTED_IPV6]"
+
+  crypto_wallet: "[REDACTED_CRYPTO_WALLET]"
+
+  passport: "[REDACTED_PASSPORT]"
+  drivers_license: "[REDACTED_DRIVERS_LICENSE]"
+  tax_id: "[REDACTED_TAX_ID]"
+  ein: "[REDACTED_EIN]"
+
+  username: "[REDACTED_USERNAME]"
+  url: "[REDACTED_URL]"
+  domain: "[REDACTED_DOMAIN]"
+
+  medical_license: "[REDACTED_MEDICAL_LICENSE]"
+  medical_record: "[REDACTED_MEDICAL_RECORD]"
+  insurance_id: "[REDACTED_INSURANCE_ID]"
+
+  vin: "[REDACTED_VIN]"
+  license_plate: "[REDACTED_LICENSE_PLATE]"
+
+  aws_access_key: "[REDACTED_AWS_KEY]"
+  github_token: "[REDACTED_GITHUB_TOKEN]"
+  google_api_key: "[REDACTED_GOOGLE_API_KEY]"
+  slack_token: "[REDACTED_SLACK_TOKEN]"
+  bearer_token: "[REDACTED_BEARER_TOKEN]"
+  private_key: "[REDACTED_PRIVATE_KEY]"
+  ssh_key: "[REDACTED_SSH_KEY]"
+  jwt_token: "[REDACTED_JWT]"
+
+scoring:
+
+  max_score: 100
+
+  threshold:
+    low: 20
+    medium: 45
+    high: 70
+    critical: 90
+
+  weights:
+
+    email: 10
+    phone: 15
+    person: 8
+    location: 5
+    organization: 6
+
+    credit_card: 30
+    ssn: 35
+    bank_account: 25
+    iban: 25
+    routing_number: 20
+    swift_code: 20
+
+    passport: 25
+    drivers_license: 20
+    tax_id: 25
+    ein: 20
+
+    ip_address: 8
+    ipv4: 8
+    ipv6: 10
+
+    crypto_wallet: 15
+
+    medical_license: 20
+    medical_record: 35
+    insurance_id: 25
+
+    vin: 12
+    license_plate: 8
+
+    username: 5
+    url: 2
+    domain: 2
+
+    aws_access_key: 50
+    github_token: 50
+    google_api_key: 50
+    slack_token: 45
+    bearer_token: 40
+    private_key: 60
+    ssh_key: 60
+    jwt_token: 30
+
+limits:
+
+  max_entities: 500
+
+  max_entity_length: 256
+
+  max_document_chars: 50000
+
+  stop_after_max_score: false
+
+redaction:
+
+  preserve_email_domain: false
+
+  preserve_last4_credit_card: true
+
+  preserve_phone_country_code: true
+
+  preserve_ip_subnet: false
+
+  preserve_name_initials: false
+
+logging:
+
+  record_entity_counts: true
+
+  record_entity_types: true
+
+  record_scores: true
+
+  record_offsets: false

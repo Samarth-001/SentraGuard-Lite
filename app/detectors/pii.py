@@ -1,13 +1,145 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import phonenumbers
+import yaml
 
 from app.models import DetectorResult
 
 import re
+
+
+# ---------------------------------------------------------------------------
+# Pattern / config loading
+# ---------------------------------------------------------------------------
+# Everything that used to be a hardcoded constant in this module (email
+# regex, phone region, Presidio entity map, confidence floor, redaction
+# tokens, scoring weights) now lives in patterns/pii.yaml. Swapping that
+# file (e.g. with an AIThreatIntel-fed one) changes detector behavior with
+# no code change. Loading is fail-soft: a missing/invalid file falls back
+# to the exact defaults this module shipped with, so nothing breaks if the
+# file isn't present yet.
+
+_PATTERNS_PATH = Path(
+    os.environ.get(
+        "PII_PATTERNS_PATH",
+        str(Path(__file__).resolve().parent.parent / "patterns" / "pii.yaml"),
+    )
+)
+
+_DEFAULT_PATTERNS: dict = {
+    "email_regex": (
+        r"\b[A-Za-z0-9](?:[A-Za-z0-9._%+-]*[A-Za-z0-9])?"
+        r"@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+\b"
+    ),
+    "phone": {
+        "default_region": "US",
+        "max_scan_chars": 50_000,
+    },
+    "ner": {
+        "language": "en",
+        "min_confidence": 0.4,
+        "max_scan_chars": 50_000,
+        "entity_map": {
+            "PERSON": "person",
+            "LOCATION": "location",
+            "CREDIT_CARD": "credit_card",
+            "US_SSN": "ssn",
+            "US_BANK_NUMBER": "bank_account",
+            "IBAN_CODE": "iban",
+            "IP_ADDRESS": "ip_address",
+            "CRYPTO": "crypto_wallet",
+            "US_DRIVER_LICENSE": "drivers_license",
+            "US_PASSPORT": "passport",
+            "MEDICAL_LICENSE": "medical_license",
+            "EMAIL_ADDRESS": "email",
+            "PHONE_NUMBER": "phone",
+        },
+    },
+    "tokens": {
+        "email": "[REDACTED_EMAIL]",
+        "phone": "[REDACTED_PHONE]",
+        "person": "[REDACTED_PERSON]",
+        "location": "[REDACTED_LOCATION]",
+        "credit_card": "[REDACTED_CREDIT_CARD]",
+        "ssn": "[REDACTED_SSN]",
+        "bank_account": "[REDACTED_BANK_ACCOUNT]",
+        "iban": "[REDACTED_IBAN]",
+        "ip_address": "[REDACTED_IP_ADDRESS]",
+        "crypto_wallet": "[REDACTED_CRYPTO_WALLET]",
+        "drivers_license": "[REDACTED_DRIVERS_LICENSE]",
+        "passport": "[REDACTED_PASSPORT]",
+        "medical_license": "[REDACTED_MEDICAL_LICENSE]",
+    },
+    "scoring": {
+        "max_score": 60,
+        "weights": {
+            "email": 10,
+            "phone": 15,
+            "person": 8,
+            "location": 5,
+            "credit_card": 25,
+            "ssn": 30,
+            "bank_account": 20,
+            "iban": 20,
+            "ip_address": 10,
+            "crypto_wallet": 15,
+            "drivers_license": 20,
+            "passport": 20,
+            "medical_license": 15,
+        },
+    },
+}
+
+
+def _deep_merge_defaults(data: dict) -> dict:
+    """Shallow-per-section merge over `_DEFAULT_PATTERNS` so a partial
+    pii.yaml (e.g. one that only overrides `scoring.weights.ssn`) doesn't
+    silently drop every other key. Keeps the fallback behavior predictable
+    without requiring a full recursive merge implementation.
+    """
+    merged = {**_DEFAULT_PATTERNS, **data}
+
+    merged["phone"] = {**_DEFAULT_PATTERNS["phone"], **(data.get("phone") or {})}
+
+    merged["ner"] = {**_DEFAULT_PATTERNS["ner"], **(data.get("ner") or {})}
+    merged["ner"]["entity_map"] = {
+        **_DEFAULT_PATTERNS["ner"]["entity_map"],
+        **((data.get("ner") or {}).get("entity_map") or {}),
+    }
+
+    merged["tokens"] = {**_DEFAULT_PATTERNS["tokens"], **(data.get("tokens") or {})}
+
+    merged["scoring"] = {**_DEFAULT_PATTERNS["scoring"], **(data.get("scoring") or {})}
+    merged["scoring"]["weights"] = {
+        **_DEFAULT_PATTERNS["scoring"]["weights"],
+        **((data.get("scoring") or {}).get("weights") or {}),
+    }
+
+    return merged
+
+
+def _load_patterns() -> dict:
+    try:
+        with open(_PATTERNS_PATH, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (FileNotFoundError, OSError, yaml.YAMLError) as exc:
+        print(
+            f"[PII] Could not load patterns from {_PATTERNS_PATH} ({exc}); "
+            "falling back to built-in defaults"
+        )
+        return _DEFAULT_PATTERNS
+    return _deep_merge_defaults(data)
+
+
+# Loaded once at import time (module-level singleton), same lifecycle as
+# the Presidio analyzer singleton below.
+_PATTERNS = _load_patterns()
 
 
 # ---------------------------------------------------------------------------
@@ -28,12 +160,7 @@ class Finding:
 # Email detection
 # ---------------------------------------------------------------------------
 
-_EMAIL_RE = re.compile(
-    r"\b[A-Za-z0-9](?:[A-Za-z0-9._%+-]*[A-Za-z0-9])?"
-    r"@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
-    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+\b",
-    re.IGNORECASE,
-)
+_EMAIL_RE = re.compile(_PATTERNS["email_regex"], re.IGNORECASE)
 
 
 def _find_emails(text: str) -> List[Finding]:
@@ -47,8 +174,8 @@ def _find_emails(text: str) -> List[Finding]:
 # Phone detection
 # ---------------------------------------------------------------------------
 
-_DEFAULT_PHONE_REGION = "US"
-_MAX_PHONE_SCAN_CHARS = 50_000
+_DEFAULT_PHONE_REGION = _PATTERNS["phone"]["default_region"]
+_MAX_PHONE_SCAN_CHARS = _PATTERNS["phone"]["max_scan_chars"]
 
 
 def _find_phones(text: str) -> List[Finding]:
@@ -104,34 +231,18 @@ def _find_phones(text: str) -> List[Finding]:
 # `Finding` (below) rather than accepting all of them: broad NER over
 # arbitrary text produces low-value noise for entities like DATE_TIME or
 # generic NRP (nationality/religion/politics) that aren't PII in the
-# redaction sense we care about here.
+# redaction sense we care about here. The allowlist itself now lives in
+# pii.yaml (`ner.entity_map`) rather than being hardcoded.
 
-_PRESIDIO_ENTITY_MAP: Dict[str, str] = {
-    "PERSON": "person",
-    "LOCATION": "location",
-    "CREDIT_CARD": "credit_card",
-    "US_SSN": "ssn",
-    "US_BANK_NUMBER": "bank_account",
-    "IBAN_CODE": "iban",
-    "IP_ADDRESS": "ip_address",
-    "CRYPTO": "crypto_wallet",
-    "US_DRIVER_LICENSE": "drivers_license",
-    "US_PASSPORT": "passport",
-    "MEDICAL_LICENSE": "medical_license",
-    # Presidio also detects these; mapped onto the same type keys the
-    # regex detectors already use so overlapping spans merge naturally
-    # (see _merge_overlaps) instead of double-counting the same PII.
-    "EMAIL_ADDRESS": "email",
-    "PHONE_NUMBER": "phone",
-}
+_PRESIDIO_ENTITY_MAP: Dict[str, str] = _PATTERNS["ner"]["entity_map"]
 
 # Below this, Presidio's own recognizer/NER confidence is too low to act
 # on for a redaction use case (as opposed to, say, a review-queue use
 # case where low-confidence hints are still useful).
-_PRESIDIO_MIN_CONFIDENCE = 0.4
+_PRESIDIO_MIN_CONFIDENCE = _PATTERNS["ner"]["min_confidence"]
 
-_PRESIDIO_LANGUAGE = "en"
-_MAX_NER_SCAN_CHARS = 50_000  # bound worst-case latency on very long inputs
+_PRESIDIO_LANGUAGE = _PATTERNS["ner"]["language"]
+_MAX_NER_SCAN_CHARS = _PATTERNS["ner"]["max_scan_chars"]
 
 
 class _PresidioNER:
@@ -233,45 +344,16 @@ _DETECTORS: List[Tuple[str, Callable[[str], List[Finding]]]] = [
     ("presidio_ner", _find_ner_entities),
 ]
 
-DEFAULT_TOKENS: Dict[str, str] = {
-    "email": "[REDACTED_EMAIL]",
-    "phone": "[REDACTED_PHONE]",
-    "person": "[REDACTED_PERSON]",
-    "location": "[REDACTED_LOCATION]",
-    "credit_card": "[REDACTED_CREDIT_CARD]",
-    "ssn": "[REDACTED_SSN]",
-    "bank_account": "[REDACTED_BANK_ACCOUNT]",
-    "iban": "[REDACTED_IBAN]",
-    "ip_address": "[REDACTED_IP_ADDRESS]",
-    "crypto_wallet": "[REDACTED_CRYPTO_WALLET]",
-    "drivers_license": "[REDACTED_DRIVERS_LICENSE]",
-    "passport": "[REDACTED_PASSPORT]",
-    "medical_license": "[REDACTED_MEDICAL_LICENSE]",
-}
+DEFAULT_TOKENS: Dict[str, str] = _PATTERNS["tokens"]
 
 # Base score contribution per type, plus diminishing returns per extra
 # match of the same type, capped so e.g. 100 emails in one request doesn't
 # blow past everything else disproportionately. Weights for the
 # NER-sourced types are set by sensitivity: national IDs / financial
-# identifiers score higher than a bare name or city mention.
-_TYPE_BASE_WEIGHT: Dict[str, int] = {
-    "email": 10,
-    "phone": 15,
-    "person": 8,
-    "location": 5,
-    "credit_card": 25,
-    "ssn": 30,
-    "bank_account": 20,
-    "iban": 20,
-    "ip_address": 10,
-    "crypto_wallet": 15,
-    "drivers_license": 20,
-    "passport": 20,
-    "medical_license": 15,
-}
-# Raised from the original 40 now that higher-severity NER-sourced types
-# (SSN, credit card, passport, ...) can contribute to the same total.
-_MAX_SCORE = 60
+# identifiers score higher than a bare name or city mention. Both weights
+# and the cap now come from pii.yaml (`scoring.weights` / `scoring.max_score`).
+_TYPE_BASE_WEIGHT: Dict[str, int] = _PATTERNS["scoring"]["weights"]
+_MAX_SCORE = _PATTERNS["scoring"]["max_score"]
 
 
 def _merge_overlaps(findings: List[Finding]) -> List[Finding]:
@@ -363,6 +445,11 @@ class PIIDetector:
     shared rather than duplicated per layer. The NER layer is fail-soft:
     if Presidio/spaCy aren't installed, this detector transparently falls
     back to regex-only behavior identical to before.
+
+    All patterns/config (email regex, phone region, NER entity allowlist,
+    confidence floor, redaction tokens, scoring weights) are loaded from
+    `PII_PATTERNS_PATH` (default: patterns/pii.yaml) at import time. Swap
+    that file to change detection behavior without touching this module.
     """
 
     name = "pii"
@@ -373,9 +460,9 @@ class PIIDetector:
         # used only as an unreachable-in-practice safety net (see scan()).
         self.score = score
         # Optional override for redaction tokens (e.g. a caller wanting
-        # "[EMAIL]" instead of "[REDACTED_EMAIL]"). Defaults reproduce the
-        # original tokens exactly, so no existing caller is affected by
-        # this being added.
+        # "[EMAIL]" instead of "[REDACTED_EMAIL]"). Defaults come from the
+        # loaded pii.yaml (or built-in fallback), so no existing caller is
+        # affected by this being added.
         self.tokens = {**DEFAULT_TOKENS, **(tokens or {})}
 
     def scan(self, text: str) -> DetectorResult:

@@ -1,0 +1,159 @@
+# RAG-specific injection signatures.
+#
+# Schema:
+#   id:       unique signature identifier
+#   severity: severity score (0-100)
+#   pattern:  Python regex matched against normalized document text
+#   flags:    Python re flags
+
+rag_patterns:
+
+  - id: system_directive
+    severity: 30
+    pattern: '(^|\n)\s*system\s*:'
+    flags: [IGNORECASE, MULTILINE]
+
+  - id: assistant_directive
+    severity: 20
+    pattern: '(^|\n)\s*assistant\s*:'
+    flags: [IGNORECASE, MULTILINE]
+
+  - id: developer_directive
+    severity: 25
+    pattern: '(^|\n)\s*developer\s*:'
+    flags: [IGNORECASE, MULTILINE]
+
+  - id: user_directive
+    severity: 10
+    pattern: '(^|\n)\s*user\s*:'
+    flags: [IGNORECASE, MULTILINE]
+
+  - id: role_block
+    severity: 25
+    pattern: '(role|actor)\s*:\s*(system|assistant|developer|user)'
+    flags: [IGNORECASE]
+
+  - id: instruction_block
+    severity: 20
+    pattern: '(instruction|instructions)\s*:'
+    flags: [IGNORECASE]
+
+  - id: policy_override
+    severity: 30
+    pattern: '(override|bypass|replace|disable)\s+(the |your |all )?(policy|policies|rules|guidelines|restrictions|filters)'
+    flags: [IGNORECASE]
+
+  - id: priority_override
+    severity: 30
+    pattern: '(these|following)\s+instructions\s+(override|supersede|replace|take\s+priority\s+over)'
+    flags: [IGNORECASE]
+
+  - id: assistant_must
+    severity: 20
+    pattern: '(assistant|model|ai)\s+must\s+'
+    flags: [IGNORECASE]
+
+  - id: assistant_should
+    severity: 15
+    pattern: '(assistant|model|ai)\s+should\s+'
+    flags: [IGNORECASE]
+
+  - id: assistant_is_required
+    severity: 20
+    pattern: '(assistant|model|ai)\s+is\s+(required|expected)\s+to'
+    flags: [IGNORECASE]
+
+  - id: imperative_instruction
+    severity: 15
+    pattern: '(always|never|must|only|strictly)\s+(answer|respond|follow|obey|comply)'
+    flags: [IGNORECASE]
+
+  - id: embedded_system_tag
+    severity: 25
+    pattern: '<\s*(system|assistant|developer)\s*>'
+    flags: [IGNORECASE]
+
+  - id: embedded_system_end_tag
+    severity: 20
+    pattern: '<\s*/\s*(system|assistant|developer)\s*>'
+    flags: [IGNORECASE]
+
+  - id: markdown_system_block
+    severity: 20
+    pattern: '```(system|assistant|developer)'
+    flags: [IGNORECASE]
+
+  - id: yaml_role_block
+    severity: 20
+    pattern: '(system|assistant|developer)\s*:\s*\|'
+    flags: [IGNORECASE]
+
+  - id: xml_instruction
+    severity: 20
+    pattern: '<(instruction|instructions|directive)[^>]*>'
+    flags: [IGNORECASE]
+
+  - id: json_role
+    severity: 20
+    pattern: '"role"\s*:\s*"(system|assistant|developer)"'
+    flags: [IGNORECASE]
+
+  - id: conversation_header
+    severity: 15
+    pattern: '(begin|start)\s+(conversation|chat|dialog)'
+    flags: [IGNORECASE]
+
+  - id: prompt_delimiter
+    severity: 20
+    pattern: '(begin|end)\s+(prompt|system|instructions)'
+    flags: [IGNORECASE]
+
+  - id: separator_banner
+    severity: 10
+    pattern: '={3,}|-{3,}|#{3,}'
+    flags: [MULTILINE]
+
+  - id: priority_notice
+    severity: 25
+    pattern: '(high|highest|critical)\s+priority'
+    flags: [IGNORECASE]
+
+  - id: confidential_block
+    severity: 15
+    pattern: '(internal|confidential|private)\s+(instructions|prompt|configuration)'
+    flags: [IGNORECASE]
+
+  - id: execution_notice
+    severity: 15
+    pattern: '(execute|run|process)\s+the\s+following'
+    flags: [IGNORECASE]
+
+  - id: command_block
+    severity: 15
+    pattern: '(^|\n)\s*(command|commands)\s*:'
+    flags: [IGNORECASE, MULTILINE]
+
+  - id: note_to_assistant
+    severity: 15
+    pattern: '(note|message)\s+to\s+(assistant|model|ai)'
+    flags: [IGNORECASE]
+
+  - id: hidden_metadata
+    severity: 15
+    pattern: '(metadata|internal\s+note|developer\s+note)\s*:'
+    flags: [IGNORECASE]
+
+  - id: embedded_prompt
+    severity: 20
+    pattern: '(embedded|hidden)\s+(prompt|instructions)'
+    flags: [IGNORECASE]
+
+  - id: instruction_section
+    severity: 15
+    pattern: '(^|\n)\s*(instructions?|directives?)\s*$'
+    flags: [IGNORECASE, MULTILINE]
+
+  - id: role_assignment
+    severity: 20
+    pattern: '(role|identity)\s+(is|becomes?)\s+(system|assistant|developer)'
+    flags: [IGNORECASE]

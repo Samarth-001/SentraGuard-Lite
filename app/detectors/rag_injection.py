@@ -5,11 +5,18 @@ import binascii
 import codecs
 import hashlib
 import math
+import os
 import re
 import string
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - optional dependency
+    yaml = None
 
 from app.models import DetectorResult
 from app.detectors.prompt_injection import (
@@ -58,6 +65,11 @@ from app.detectors.prompt_injection import (
 # original document text, plus a couple of RAG-flavored signatures
 # (system_directive / policy_override / assistant_directive) that don't
 # have a natural prompt-side equivalent.
+#
+# Those RAG-flavored signatures are now loaded from an external YAML file
+# (see "1b. External pattern library" below) rather than hardcoded, so a
+# future feed (e.g. AIThreatIntel) can update the pattern set by dropping
+# in a new file — no code change, no redeploy of this module.
 #
 # On top of the original rule-based engine, this file now adds three
 # layers described in the module docstring further down (search for
@@ -194,9 +206,105 @@ def _map_span_to_original(start: int, end: int, index_map: List[int], original_l
 
 
 # ---------------------------------------------------------------------------
-# 2. Structured signatures — RAG-specific ones, plus every category from
-#    the prompt-injection engine (single source of truth for intent
-#    categories; only the container/normalization logic differs here).
+# 1b. External pattern library — RAG-specific signatures
+# ---------------------------------------------------------------------------
+# These three signatures (system_directive / policy_override /
+# assistant_directive) don't have a natural prompt-side equivalent, so
+# unlike the category/structural signatures below they can't be pulled
+# from prompt_injection.py. They're loaded here from a YAML file instead
+# of being hardcoded, so the pattern set can be updated by replacing the
+# file (e.g. from an intel feed) with no code change.
+#
+# Path resolution: RAG_INJECTION_PATTERNS_PATH env var if set, otherwise
+# <app>/patterns/rag_injection.yaml next to this detectors package.
+_PATTERNS_PATH = Path(
+    os.environ.get(
+        "RAG_INJECTION_PATTERNS_PATH",
+        str(Path(__file__).resolve().parent.parent / "patterns" / "rag_injection.yaml"),
+    )
+)
+
+# Fallback used if the YAML file is missing, unreadable, malformed, or the
+# `yaml` package isn't installed — the detector degrades to its previous
+# hardcoded behavior rather than failing to load at all.
+_DEFAULT_RAG_PATTERN_DEFS: List[Dict] = [
+    {
+        "id": "system_directive",
+        "severity": 30,
+        "pattern": r"(^|\n)\s*system\s*:",
+        "flags": ["IGNORECASE"],
+    },
+    {
+        "id": "policy_override",
+        "severity": 25,
+        "pattern": r"(override|bypass)\s+(the |your |all )?(policy|policies|rules|guidelines|restrictions|filters)",
+        "flags": ["IGNORECASE"],
+    },
+    {
+        "id": "assistant_directive",
+        "severity": 15,
+        "pattern": r"(assistant|you)\s+must\s+(now\s+|always\s+)?(ignore|comply|obey)",
+        "flags": ["IGNORECASE"],
+    },
+]
+
+_RE_FLAG_MAP: Dict[str, int] = {
+    "IGNORECASE": re.IGNORECASE,
+    "MULTILINE": re.MULTILINE,
+    "DOTALL": re.DOTALL,
+    "VERBOSE": re.VERBOSE,
+}
+
+
+def _compile_re_flags(flag_names: Optional[Iterable[str]]) -> int:
+    flags = 0
+    for name in flag_names or []:
+        flags |= _RE_FLAG_MAP.get(str(name).upper(), 0)
+    return flags
+
+
+def _load_rag_pattern_defs(path: Path) -> List[Dict]:
+    """Read `rag_patterns` entries from `path`. Falls back to
+    `_DEFAULT_RAG_PATTERN_DEFS` on any failure (missing file, bad YAML,
+    missing key, no yaml package) so a broken/missing external file can
+    never take the detector down — it just loses external updatability
+    until fixed."""
+    if yaml is None:
+        return _DEFAULT_RAG_PATTERN_DEFS
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return _DEFAULT_RAG_PATTERN_DEFS
+
+    if not isinstance(data, dict) or not data.get("rag_patterns"):
+        return _DEFAULT_RAG_PATTERN_DEFS
+
+    defs: List[Dict] = []
+    for entry in data["rag_patterns"]:
+        if isinstance(entry, dict) and "id" in entry and "pattern" in entry:
+            defs.append(entry)
+    return defs or _DEFAULT_RAG_PATTERN_DEFS
+
+
+def _build_rag_signatures(path: Path = _PATTERNS_PATH) -> List["Signature"]:
+    signatures: List[Signature] = []
+    for entry in _load_rag_pattern_defs(path):
+        try:
+            compiled = re.compile(entry["pattern"], _compile_re_flags(entry.get("flags")))
+        except re.error:
+            continue  # skip a bad pattern rather than failing the whole load
+        signatures.append(
+            Signature(id=entry["id"], severity=int(entry.get("severity", 20)), pattern=compiled)
+        )
+    return signatures
+
+
+# ---------------------------------------------------------------------------
+# 2. Structured signatures — RAG-specific ones (from YAML, see 1b above),
+#    plus every category from the prompt-injection engine (single source
+#    of truth for intent categories; only the container/normalization
+#    logic differs here).
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -219,23 +327,7 @@ def _structural_signatures() -> List[Signature]:
 
 
 SIGNATURES: List[Signature] = (
-    [
-        # RAG-flavored signatures without a clean prompt-side equivalent.
-        Signature(id="system_directive", severity=30, pattern=re.compile(r"(^|\n)\s*system\s*:", re.IGNORECASE)),
-        Signature(
-            id="policy_override",
-            severity=25,
-            pattern=re.compile(
-                r"(override|bypass)\s+(the |your |all )?(policy|policies|rules|guidelines|restrictions|filters)",
-                re.IGNORECASE,
-            ),
-        ),
-        Signature(
-            id="assistant_directive",
-            severity=15,
-            pattern=re.compile(r"(assistant|you)\s+must\s+(now\s+|always\s+)?(ignore|comply|obey)", re.IGNORECASE),
-        ),
-    ]
+    _build_rag_signatures()
     + _category_signatures()
     + _structural_signatures()
 )
@@ -625,7 +717,6 @@ def _semantic_findings(
         return [], 0.0
 
     active_backend = backend or get_default_embedding_backend()
-    print(f"Backend being used is: {active_backend}")
     template_vectors = _get_template_embeddings(active_backend)
     chunk_vectors = active_backend.embed([c[2] for c in chunks])
 
@@ -849,7 +940,8 @@ def _decide(confidence: float) -> str:
 #   Normalization Layer (NFKC, homoglyphs, leetspeak, spacing)
 #           |
 #           v
-#   Rule-based Detection (regex + heuristics)  ---> encoded spans
+#   Rule-based Detection (regex + heuristics, RAG-specific patterns
+#   loaded from YAML — see section 1b)                ---> encoded spans
 #           |                                          |
 #           |                                   decode + rescan
 #           v                                          |
@@ -908,42 +1000,15 @@ class RagInjectionDetector:
         self._extra_trusted_ids = frozenset(i.strip().lower() for i in (trusted_document_ids or []))
 
     def scan(self, text: str, *, document_id: Optional[str] = None) -> DetectorResult:
-        print("\n========== RAG DETECTOR ==========")
-        print("Original text:")
-        print(text)
-
         if not text:
             return DetectorResult(tag=self.name, matched=False, score=0, sanitized_text=text or "")
 
         span_findings, doc_signals, decoded_notes = _run_rule_based_pipeline(text)
 
-        print("\n========== Rule-Based Pipeline ==========")
-        print("Span findings:")
-        for f in span_findings:
-            print(f)
-
-        print("\nDocument signals:")
-        for s in doc_signals:
-            print(s)
-
-        print("\nDecoded notes:")
-        for n in decoded_notes:
-            print(n)
-
         semantic_span_findings, max_semantic_similarity = _semantic_findings(
             text, backend=self._embedding_backend, threshold=self._semantic_threshold
         )
-        print("\n========== Semantic Detection ==========")
-        print(f"Max similarity: {max_semantic_similarity}")
-
-        for f in semantic_span_findings:
-            print(f)
-
         span_findings += semantic_span_findings
-
-        print("\n========== After Dampening ==========")
-        for f in span_findings:
-            print(f)
 
         if not span_findings and not doc_signals:
             return DetectorResult(tag=self.name, matched=False, score=0, sanitized_text=text)
@@ -969,17 +1034,6 @@ class RagInjectionDetector:
         has_decoded_payload = any(f.signature_id == "decoded_payload_injection" for f in merged)
         dampened_count = sum(1 for f in merged if f.dampened)
         avg_dampening = dampened_count / len(merged) if merged else 0.0
-
-        print("\n========== Confidence Inputs ==========")
-        print(f"span_score = {span_score}")
-        print(f"doc_score = {doc_score}")
-        print(f"role_spoofing = {role_spoofing}")
-        print(f"obfuscation_total = {obfuscation_total}")
-        print(f"has_external_source = {has_external_source}")
-        print(f"has_decoded_payload = {has_decoded_payload}")
-        print(f"avg_dampening = {avg_dampening}")
-        print(f"semantic_similarity = {max_semantic_similarity}")
-        print(f"imperative_density = {_imperative_density(text)}")
 
         confidence = _compute_confidence(
             span_score=span_score,
